@@ -62,7 +62,8 @@ static uint32 status_reg = 0;
 
 /* Hold copies of computed time of flight and distance here for reference so that it can be examined at a debug breakpoint. */
 static double tof;
-static double distance;
+static double distance = 999; //Make this initially long to handle initial no connect
+static int los_count = 0;     //Loss of signal counter
 
 /* Declaration of static functions. */
 static void resp_msg_get_ts(uint8 *ts_field, uint32 *ts);
@@ -72,6 +73,7 @@ static void resp_msg_get_ts(uint8 *ts_field, uint32 *ts);
 static volatile int tx_count = 0 ; // Successful transmit counter
 static volatile int rx_count = 0 ; // Successful receive counter 
 
+#define PIN_GPIO  (12UL)    //Alarm pin is GPIO-12
 
 /*! ------------------------------------------------------------------------------------------------------------------
 * @fn main()
@@ -82,10 +84,8 @@ static volatile int rx_count = 0 ; // Successful receive counter
 *
 * @return none
 */
-int ss_init_run(void)
+int check_distance(void)
 {
-
-
   /* Loop forever initiating ranging exchanges. */
 
 
@@ -138,7 +138,8 @@ int ss_init_run(void)
     * As the sequence number field of the frame is not relevant, it is cleared to simplify the validation of the frame. */
     rx_buffer[ALL_MSG_SN_IDX] = 0;
     if (memcmp(rx_buffer, rx_resp_msg, ALL_MSG_COMMON_LEN) == 0)
-    {	
+    {
+      los_count = 0;
       rx_count++;
       printf("Reception # : %d\r\n",rx_count);
       uint32 poll_tx_ts, resp_rx_ts, poll_rx_ts, resp_tx_ts;
@@ -167,6 +168,7 @@ int ss_init_run(void)
   }
   else
   {
+    los_count++;
     /* Clear RX error/timeout events in the DW1000 status register. */
     dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR);
 
@@ -209,16 +211,53 @@ static void resp_msg_get_ts(uint8 *ts_field, uint32 *ts)
 void ss_initiator_task_function (void * pvParameter)
 {
   UNUSED_PARAMETER(pvParameter);
-
+  // Configure GPIO pin as output with standard drive strength.
+  /*NRF_GPIO->PIN_CNF[PIN_GPIO] = (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos) |
+                                (GPIO_PIN_CNF_DRIVE_S0S1 << GPIO_PIN_CNF_DRIVE_Pos) |
+                                (GPIO_PIN_CNF_INPUT_Connect << GPIO_PIN_CNF_INPUT_Pos) |
+                                (GPIO_PIN_CNF_PULL_Disabled << GPIO_PIN_CNF_PULL_Pos) |
+                                (GPIO_PIN_CNF_SENSE_Disabled << GPIO_PIN_CNF_SENSE_Pos);*/
+   nrf_gpio_pin_clear(PIN_GPIO);
+   nrf_gpio_cfg_output(PIN_GPIO);
+ 
   //dwt_setrxtimeout(RESP_RX_TIMEOUT_UUS);
 
   dwt_setleds(DWT_LEDS_ENABLE);
 
   while (true)
   {
-    ss_init_run();
-    /* Delay a task for a given number of ticks */
-    vTaskDelay(RNG_DELAY_MS);
+    check_distance();
+    if (los_count > 10)
+    {
+      distance = 999;
+      printf("no signal\r\n");
+    }
+
+    if (distance < 2.0)
+    {
+      printf("*** TOO CLOSE ***\r\n");
+      LEDS_ON(BSP_LED_1_MASK);
+      nrf_gpio_pin_set(PIN_GPIO);
+        //NRF_GPIO->OUTSET = (1UL << PIN_GPIO);
+      vTaskDelay(RNG_DELAY_MS);
+    }
+    else if (distance <2.5)
+    {
+      printf("---be careful ---\r\n");
+      LEDS_OFF(BSP_LED_1_MASK);
+      nrf_gpio_pin_toggle(PIN_GPIO);
+        //NRF_GPIO->OUTCLR = (1UL << PIN_GPIO);  
+      vTaskDelay(RNG_DELAY_MS/10);
+    }
+    else
+    {
+      LEDS_OFF(BSP_LED_1_MASK);
+      nrf_gpio_pin_clear(PIN_GPIO);
+        //NRF_GPIO->OUTCLR = (1UL << PIN_GPIO);  
+     /* Slower poll if further away */
+      vTaskDelay(RNG_DELAY_MS*2);
+    }
+
     /* Tasks must be implemented to never return... */
   }
 }
