@@ -61,3 +61,6 @@ dkms.conf
 
 # Arm project user dependant file 
 ./examples/*/*.uvguix.*
+*.asm
+*.ind
+*.ld
